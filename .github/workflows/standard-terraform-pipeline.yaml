@@ -1,0 +1,122 @@
+name: "dotnet standard ci pipeline"
+
+on:
+ workflow_call:
+  inputs:
+    repository_ref:
+        required: true
+        type: string 
+    workspace:
+        required: true
+        type: string
+    github_workspace:
+        required: true
+        type: string
+        default: "."
+    state_name:
+        required: true
+        type: string        
+    build_env:
+        required: true
+        type: string    
+    terrafrom_version:
+        required: false
+        type: string
+        default: "1.3.9"
+    ssh_required:
+        required: false
+        type: boolean
+        default: true
+    use_repository_para_files:
+        required: false
+        type: boolean
+        default: false        
+
+jobs:
+  build-infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Git pull
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.repository_ref }}
+        
+      - name: Setup terrafrom
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terrafrom_version }}
+
+      - name: Show Parameters
+        run: |
+            echo ${{ inputs.repository_ref }}          
+            echo ${{ inputs.workspace }}
+            echo ${{ inputs.github_workspace }}
+            echo ${{ inputs.build_env }}          
+            echo ${{ inputs.use_repository_para_files }}          
+
+      - name: Set environmental prd
+        if: ${{ inputs.build_env  == 'prd'  ||  (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/master') }}
+        run: |              
+              echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_PRD }}" >> $GITHUB_ENV
+              echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_PRD }}" >> $GITHUB_ENV
+              echo "bucket=china-application-infrastructure" >> $GITHUB_ENV
+              echo "stage=prd" >> $GITHUB_ENV              
+        
+      - name: Set environmental stg
+        if: ${{ inputs.build_env  == 'stg' || (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/stg') }}
+        run: |
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_STG }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_STG }}" >> $GITHUB_ENV     
+            echo "bucket=china-application-infrastructure-stg" >> $GITHUB_ENV     
+            echo "stage=stg" >> $GITHUB_ENV
+            
+      - name: Set environmental dev
+        if: ${{ inputs.build_env  == 'dev' || (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && (inputs.repository_ref == 'refs/heads/dev'|| inputs.repository_ref == 'refs/heads/devops'))  }}
+        run: |
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_DEV }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_DEV }}" >> $GITHUB_ENV     
+            echo "bucket=china-application-infrastructure-dev" >> $GITHUB_ENV       
+            echo "stage=dev" >> $GITHUB_ENV         
+      
+      - name: Setup aws credentials and variables   
+        run: |
+          mkdir -p ~/.aws
+          cd ~/.aws
+          touch credentials || exit
+          echo "[polestar-$stage]" >> credentials
+          echo "aws_access_key_id=$AWS_ACCESS_KEY_ID" >> credentials
+          echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" >> credentials
+          echo "region=cn-northwest-1" >> credentials  
+
+          touch config || exit 
+          echo "[default]" >> config
+          echo "region=cn-northwest-1"  >> config
+
+      - name: replace git url
+        run: |
+          git config --global url."https://oauth2:${{ secrets.CN_COMMON_GITHUB_REPO_FULL_ACCESS }}@github.com".insteadOf https://github.com
+
+      - name: Terraform build infrastructure
+        run: |                       
+          cd  ${{ inputs.workspace }}
+          echo  -e " bucket = \"$bucket\"  \n\
+                   region = \"cn-northwest-1\" \n\
+                   key    = \"${{ inputs.state_name }}/${{ inputs.state_name }}.tfstate\" " > s3.backendname.tfbackend
+          terraform init  -backend-config="s3.backendname.tfbackend"          
+          
+          if [ "${{inputs.use_repository_para_files}}" = false ] ; then                  
+              rm -f $stage.tfvars                    
+              echo "aws_info_profile=\"polestar-$stage\"" > $stage.tfvars              
+          fi
+
+          terraform plan   -var-file="$stage.tfvars" -out=tfplan
+          terraform apply  tfplan        
+
+      - name: Clean credentials    
+        run: |
+          rm -r ~/.aws    
+          
+           
+
+     

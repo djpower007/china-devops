@@ -1,0 +1,412 @@
+name: "Nodejs eks standard pipeline"
+
+on:
+ workflow_call:
+  inputs:
+    repository_ref:
+        required: true
+        type: string    
+    build_env:
+        required: true
+        type: string      
+    project_name:
+        required: false
+        type: string  
+    node_version:
+        required: false
+        type: string
+        default: "16"
+    use_self_dockerfile:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    outputs:
+      ProjectName: ${{ steps.step9.outputs.ProjectName }}
+      AwsRegion: ${{ steps.step9.outputs.AwsRegion }}
+      stage: ${{ steps.step9.outputs.stage }}
+      AwsRole: ${{ steps.step9.outputs.AwsRole }}
+      ServicePort: ${{ steps.step9.outputs.ServicePort }}
+      ServiceGroupOrder: ${{ steps.step9.outputs.ServiceGroupOrder }}
+      AccountId: ${{ steps.step9.outputs.AccountId }}
+      AwsAlbAcmCertArn: ${{ steps.step9.outputs.AwsAlbAcmCertArn }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Set environmental prd
+        if: ${{ inputs.build_env  == 'prd'  ||  (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/master') }}
+        run: |         
+              echo "AWS_ROLE=${{ secrets.AWS_GITHUB_REPO_ACCESS_ROLE_ARN_PROD }}" >> $GITHUB_ENV              
+              echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_PRD }}" >> $GITHUB_ENV
+              echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_PRD }}" >> $GITHUB_ENV
+              echo "stage=prod" >> $GITHUB_ENV                  
+        
+      - name: Set environmental stg
+        if: ${{ inputs.build_env  == 'stg' || (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/stg') }}
+        run: |
+            echo "AWS_ROLE=${{ secrets.AWS_GITHUB_REPO_ACCESS_ROLE_ARN_STG }}" >> $GITHUB_ENV            
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_STG }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_STG }}" >> $GITHUB_ENV          
+            echo "stage=stg" >> $GITHUB_ENV
+
+      - name: Set environmental dev
+        if: ${{ inputs.build_env  == 'dev' || (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && (inputs.repository_ref == 'refs/heads/dev'|| inputs.repository_ref == 'refs/heads/devops'))  }}
+        run: |
+            echo "AWS_ROLE=${{ secrets.AWS_GITHUB_REPO_ACCESS_ROLE_ARN_DEV }}" >> $GITHUB_ENV            
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_DEV }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_DEV }}" >> $GITHUB_ENV    
+            echo "stage=dev" >> $GITHUB_ENV            
+      
+      - name: setup aws credentials and nuget for $stage        
+        run: |
+          mkdir -p ~/.aws
+          cd ~/.aws
+          touch credentials || exit
+          echo "[polestar-$stage]" >> credentials
+          echo "aws_access_key_id=$AWS_ACCESS_KEY_ID" >> credentials
+          echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" >> credentials
+          echo "region=cn-northwest-1" >> credentials
+
+          touch config || exit 
+          echo "[default]" >> config
+          echo "region=cn-northwest-1"  >> config
+
+      - name: Get eks parameter store
+        run: |
+          # get other configurations items          
+          aws ssm get-parameter --name /cn-microservice/common/eks --output json | jq '.Parameter.Value| fromjson' >> eks.json  
+          
+          echo "AWS_ALB_HOST_NAME_ARN=$(cat eks.json | jq --raw-output '.AWS_ALB_HOST_NAME_ARN')" >> $GITHUB_ENV
+          
+          echo "AWS_ALB_ACM_CERT_ARN=$(cat eks.json | jq --raw-output '.AWS_ALB_ACM_CERT_ARN')" >> $GITHUB_ENV
+          
+          echo "AWS_EKS_ACCESS_SSM_ROLE_ARN=$(cat eks.json | jq --raw-output '.AWS_EKS_ACCESS_SSM_ROLE_ARN')" >> $GITHUB_ENV
+          
+          echo "NPM_AUTH_TOKEN=$(cat eks.json | jq --raw-output '.NPM_AUTH_TOKEN')" >> $GITHUB_ENV
+          
+          echo "PROJECT_NAME=$(jq --raw-output '.name' package.json)" >> $GITHUB_ENV
+          
+          echo "AWS_REGION=cn-northwest-1" >> $GITHUB_ENV
+
+          echo "NAMESPACE=polestar-$stage" >> $GITHUB_ENV     
+
+      - name: Set AWS account id
+        run: |
+             # get aws account id
+             ACCOUNT_ID=$(aws sts get-caller-identity \
+              --query 'Account' \
+              --output text)
+
+              echo "ACCOUNT_ID=${ACCOUNT_ID}" >>  $GITHUB_ENV
+
+      - name: Get project config 
+        run: |
+          ps_config="/cn-microservice/common/config/"$PROJECT_NAME         
+          
+          aws ssm get-parameter --name  ${ps_config}  --output json | jq '.Parameter.Value| fromjson' >> ps_config.json         
+          cat ps_config.json
+          echo "SERVICE_PORT=$(cat ps_config.json   | jq --raw-output '.port')" >> $GITHUB_ENV
+
+          # each service has one identical group order according to  https://polestarjira.atlassian.net/wiki/spaces/CUA/pages/980549722/Microservices
+
+          echo "SERVICE_GROUP_ORDER=$(cat ps_config.json | jq --raw-output '.groupOrder')" >> $GITHUB_ENV
+
+      - name: build git context output
+        id: step9
+        run: |
+             echo "ProjectName=$PROJECT_NAME" >> $GITHUB_OUTPUT
+             echo "AwsRegion=$AWS_REGION" >> $GITHUB_OUTPUT
+             echo "stage=$stage" >> $GITHUB_OUTPUT
+             echo "AwsRole=$AWS_EKS_ACCESS_SSM_ROLE_ARN" >> $GITHUB_OUTPUT
+             echo "ServicePort=$SERVICE_PORT" >> $GITHUB_OUTPUT
+             echo "ServiceGroupOrder=$SERVICE_GROUP_ORDER" >> $GITHUB_OUTPUT
+             echo "AccountId=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+             echo "AwsAlbAcmCertArn=$AWS_ALB_ACM_CERT_ARN" >> $GITHUB_OUTPUT
+
+      - name: Set npm registry
+        run: |
+            echo -e "\
+            strict-ssl=false    \n\
+            @polestar:registry=https://npm.pkg.github.com \n\
+            @polestarchina:registry=https://npm.pkg.github.com \n\
+            //npm.pkg.github.com/:_authToken= $NPM_AUTH_TOKEN" >.npmrc
+
+            cat .npmrc
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@aaf69d68aa3fb14c1d5a6be9ac61fe15b48453a2
+      
+      - name: Write docker file
+        run: |
+            BASE_IMAGE="$ACCOUNT_ID".dkr.ecr."$AWS_REGION".amazonaws.com.cn/node-lts-alpine3.16:latest       
+            if [ "${{inputs.use_self_dockerfile}}" = false ]    
+              then                
+                echo '
+                    FROM {{ BASE_IMAGE }} AS BUILD_IMAGE
+                    WORKDIR /app
+                    COPY . /app
+                    RUN npm i && npm run build:{{ ENVIRONMENT }}
+
+                    FROM {{ BASE_IMAGE }} as APP
+                    USER node
+                    WORKDIR /app
+
+                    # copy from build image
+                    COPY --chown=node:node --from=BUILD_IMAGE /app/dist ./dist
+                    COPY --chown=node:node --from=BUILD_IMAGE /app/node_modules ./node_modules
+                    EXPOSE {{ SERVICE_PORT }}
+                    CMD ["node", "./dist/{{ PROJECT_NAME }}.min.js"]
+                    ' | 
+                    sed -e "s|{{ PROJECT_NAME }}|$PROJECT_NAME|" \
+                        -e "s|{{ SERVICE_PORT }}|$SERVICE_PORT|" \
+                        -e "s|{{ ENVIRONMENT }}|$stage|" \
+                        -e "s|{{ BASE_IMAGE }}|$BASE_IMAGE|" \
+                        >Dockerfile
+              else                    
+                    echo 'Use self dockerfile'
+                    sed -i -e "s|{{ PROJECT_NAME }}|$PROJECT_NAME|" \
+                        -i -e "s|{{ SERVICE_PORT }}|$SERVICE_PORT|" \
+                        -i -e "s|{{ ENVIRONMENT }}|$stage|" \
+                        -i -e "s|{{ ACCOUNT_ID }}|$ACCOUNT_ID|" \
+                        -i -e "s|{{ AWS_REGION }}|$AWS_REGION|" \
+                        Dockerfile
+              fi
+              
+              cat Dockerfile
+
+      - name: Docker build
+        id: build-dockerfile
+        run: |           
+            docker build -t $PROJECT_NAME:latest .            
+
+      - name: Push docker image to AWS ECR
+        id: push-docker-image
+        run: |
+            BASE_URI=$ACCOUNT_ID".dkr.ecr.$AWS_REGION.amazonaws.com.cn"
+
+            # get repository URI
+
+            REPOSITORY_URI=$(aws ecr describe-repositories --query "repositories[?repositoryName == '$PROJECT_NAME'].repositoryUri" --region $AWS_REGION --output text )
+                      
+            # if not found, create the repository
+            if [[ -z "$REPOSITORY_URI" ]]; then
+                echo ecr create-repository for "$1"
+                aws ecr create-repository \
+                    --repository-name "$PROJECT_NAME" \
+                    --region $AWS_REGION \
+                    --image-scanning-configuration scanOnPush=true
+                #set the repository URL
+                REPOSITORY_URI=${BASE_URI}/$PROJECT_NAME
+            fi
+
+            # add login data into /home/$USER/.docker/config.json (create or update authorization token)
+            aws ecr get-login-password \
+                --region $AWS_REGION |
+                docker login \
+                    --username AWS \
+                    --password-stdin ${BASE_URI}
+
+            # docker push
+            docker tag $PROJECT_NAME:latest ${REPOSITORY_URI}:latest
+            #docker tag $PROJECT_NAME:latest ${REPOSITORY_URI}:$VERSION
+            docker push ${REPOSITORY_URI}:latest
+            #docker push ${REPOSITORY_URI}:"$VERSION"
+            
+      - name: Clean credentials    
+        run: |
+          rm -r ~/.aws
+
+  deploy:
+    needs: [build]
+    name: Deploy Service To EKS Cluster
+    runs-on:
+      - self-hosted
+      - eks
+      - ${{ needs.build.outputs.stage }}
+    env:
+      stage: ${{ needs.build.outputs.stage }}
+
+    steps:
+
+      - name: Show all parameters
+        run: |
+          echo ${{ needs.build.outputs.ProjectName }}
+          echo ${{ needs.build.outputs.ServiceGroupOrder }}
+          echo ${{ needs.build.outputs.AccountId }}
+          echo ${{ needs.build.outputs.AwsRegion }}
+          echo ${{ needs.build.outputs.ServicePort }}
+          echo ${{ needs.build.outputs.AwsRole }}
+          echo ${{ needs.build.outputs.stage }}
+          echo ${{ needs.build.outputs.AwsAlbAcmCertArn }}
+
+      - name: Create helm charts
+        run: |
+          mkdir -p ./eks/helm
+          cd ./eks/helm || exit
+          #rm -f -r ./eks/helm/${{ needs.build.outputs.ProjectName }}
+         
+          helm create ${{ needs.build.outputs.ProjectName }}
+          cd ${{ needs.build.outputs.ProjectName }}
+          mv ./templates/serviceaccount.yaml ./
+          rm -r ./templates/*.yaml
+          mv ./serviceaccount.yaml ./templates/
+          yq -i '
+           {
+              "apiVersion": "v2",
+              "name": "'${{ needs.build.outputs.ProjectName }}'",
+              "description": "A Helm chart for Kubernetes",
+              "type": "application",
+              "version": "0.1.0",
+              "appVersion": "1.16.0",
+              "dependencies": [
+                {
+                  "name": "devops-standard-helm-lib",
+                  "version": "1.0.0",
+                  "repository": "https://china-devops-infrastructure-dev.s3.cn-northwest-1.amazonaws.com.cn/helm-lib"
+                }
+              ]
+            }     
+          ' ./Chart.yaml
+          echo '{{- include "devops-standard-helm-lib.ingress" . }}' > ./templates/app.yaml
+          echo  '---' >> ./templates/app.yaml
+          echo  '{{- include "devops-standard-helm-lib.service" . }}' >> ./templates/app.yaml
+          echo  '---' >> ./templates/app.yaml
+          echo  '{{- include "devops-standard-helm-lib.deployment" . }}' >> ./templates/app.yaml
+          echo  '---' >> ./templates/app.yaml            
+          echo  '{{- include "devops-standard-helm-lib.hpa" . }}' >> ./templates/app.yaml                      
+          helm dependency update .
+
+      - name: Update helm deployment
+        run: |
+          IMAGE_NAME=${{ needs.build.outputs.AccountId }}".dkr.ecr."${{ needs.build.outputs.AwsRegion }}".amazonaws.com.cn/"${{ needs.build.outputs.ProjectName }}
+          SERVICE_GROUP_ORDER=${{ needs.build.outputs.ServiceGroupOrder }}
+          REDIRECT_PATH="/api/"${{ needs.build.outputs.ProjectName }}
+          HEALTHZ_PATH=${REDIRECT_PATH}"/healthz"
+          AWS_ROLE=${{ needs.build.outputs.AwsRole }}
+          AWS_ALB_ACM_CERT_ARN=${{ needs.build.outputs.AwsAlbAcmCertArn }}
+          GROUP_NAME="polestar-cn"
+          INGRESS_PATH=/api/auth
+
+          echo ${INGRESS_PATH}
+          echo ${GROUP_NAME}
+          echo ${HEALTHZ_PATH}
+          echo ${SERVICE_GROUP_ORDER}
+          echo ${IMAGE_NAME}
+          
+           ReplicaCount=1
+
+          if test "${{github.event.inputs.env}}" = "prod"; then
+              ReplicaCount=2          
+          fi
+          
+          echo ${ReplicaCount}
+
+          yq -i '
+          {
+          "replicaCount": 1,
+          "image": {
+              "repository": "'"$IMAGE_NAME"'",
+              "pullPolicy": "Always",
+              "tag": "latest"
+          },
+          "imagePullSecrets": [],
+          "nameOverride": "",
+          "fullnameOverride": "",
+          "serviceAccount": {
+              "create": "false",
+              "annotations": {
+                  "eks.amazonaws.com/role-arn": "'"$AWS_ROLE"'"
+              },
+              "name": ""
+          },
+          "podAnnotations": {},
+          "securityContext": {},
+          "service": {
+            "type": "ClusterIP",
+            "port": 80
+          },
+          "ingress": {              
+              "className": "alb",
+              "annotations": {
+                "alb.ingress.kubernetes.io/scheme": "internet-facing",
+                "alb.ingress.kubernetes.io/target-type": "ip",
+                "alb.ingress.kubernetes.io/group.name": "'"$GROUP_NAME"'",
+                "alb.ingress.kubernetes.io/group.order": "'"$SERVICE_GROUP_ORDER"'",
+                "alb.ingress.kubernetes.io/healthcheck-protocol": "HTTP",
+                "alb.ingress.kubernetes.io/healthcheck-port": "traffic-port",
+                "alb.ingress.kubernetes.io/healthcheck-path": "'"$HEALTHZ_PATH"'",
+                "alb.ingress.kubernetes.io/certificate-arn": "'"$AWS_ALB_ACM_CERT_ARN"'",
+                "alb.ingress.kubernetes.io/healthcheck-interval-seconds": "15",
+                "alb.ingress.kubernetes.io/healthcheck-timeout-seconds": "5",
+                "alb.ingress.kubernetes.io/success-codes": "200",
+                "alb.ingress.kubernetes.io/healthy-threshold-count": "2",
+                "alb.ingress.kubernetes.io/unhealthy-threshold-count": "2",
+                "alb.ingress.kubernetes.io/listen-ports": "[{\"HTTPS\":443}]"
+              },
+              "hosts": [
+                {
+                    "host": "'"$AWS_ALB_HOST_NAME_ARN"'",
+                    "paths": [
+                      {
+                          "path": "'"$INGRESS_PATH"'",
+                          "pathType": "Prefix"
+                      }
+                    ]
+                }
+              ],
+              "tls": []
+          },
+          "resources": {
+             "requests": {
+                "memory": "1Gi",
+                "cpu": "800m"
+              },
+              "limits": {
+                "memory": "2Gi",
+                "cpu": "1000m"
+              }
+          },
+          "autoscaling": {
+              "enabled": false,
+              "minReplicas": 2,
+              "maxReplicas": 4,
+              "targetCPUUtilizationPercentage": 70
+          },
+          "liveness":{
+            "path":"'${HEALTHZ_PATH}'"
+          },
+          "readiness":{
+            "path":"'${HEALTHZ_PATH}'"
+          },          
+          "nodeSelector": {},
+          "tolerations": [],
+          "affinity": {},          
+          "container": {
+            "port": '"${{ needs.build.outputs.ServicePort }}"'
+            }
+          }
+           ' ./eks/helm/"${{ needs.build.outputs.ProjectName }}"/values.yaml
+
+      - name: helm dry run
+        run: |
+            helm install --debug --dry-run "${{ needs.build.outputs.ProjectName }}" ./eks/helm/"${{ needs.build.outputs.ProjectName }}" -n polestar-"${{ needs.build.outputs.stage }}"
+      
+      - name: Deploy to EKS
+        run: |        
+            helm upgrade --install "${{ needs.build.outputs.ProjectName }}" ./eks/helm/"${{ needs.build.outputs.ProjectName }}" -n polestar-"${{ needs.build.outputs.stage }}"
+            #temp fix(copy kevin)
+            kubectl rollout restart deployment "${{ needs.build.outputs.ProjectName }}" -n polestar-"${{ needs.build.outputs.stage }}"
+
+

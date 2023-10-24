@@ -1,0 +1,131 @@
+name: "dotnet standard ci pipeline"
+
+on:
+ workflow_call:
+  inputs:
+    repository_ref:
+        required: true
+        type: string
+    dotnet_version:
+        required: true
+        type: string
+        default: "6.0"
+    workspace:
+        required: true
+        type: string
+    github_workspace:
+        required: true
+        type: string
+        default: "." 
+    skip_check:
+        required: false
+        type: boolean    
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Git pull 
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.repository_ref }}
+      - name: Show all parameters
+        run: |
+          echo ${{ inputs.repository_ref }}
+          echo ${{ inputs.dotnet_version }}
+          echo ${{ inputs.workspace }}
+          echo ${{ inputs.github_workspace }}
+          echo ${{ inputs.build_env }}                    
+          echo ${{ secrets.COMMON_PACKAGE_NUGET_USERNAME }}
+          echo ${{ secrets.COMMON_PACKAGE_TOKEN }}          
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}     
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v1
+        with:
+          java-version: 1.11
+
+      - name: Setup nuget config 
+        run: |
+          mkdir -p ~/.nuget
+          cd ~/.nuget
+          mkdir -p NuGet
+          cd NuGet
+          touch NuGet.Config || exit
+          echo '<?xml version="1.0" encoding="utf-8"?>
+              <configuration>
+                      <packageSources>
+                              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3"/>
+                              <add key="polestarchina" value="https://nuget.pkg.github.com/polestarchina/index.json" />
+                      </packageSources>
+                      <packageSourceCredentials>
+                      <polestarchina>'  > NuGet.Config
+          echo "<add key=\"Username\" value=\"$NugetUserName\"/>"  >> NuGet.Config
+          echo "              <add key=\"ClearTextPassword\" value=\"$NugetToken\"/>" >> NuGet.Config
+          echo '       </polestarchina> 
+                  </packageSourceCredentials> 
+              </configuration>' >> NuGet.Config
+          cat NuGet.Config
+        env:
+          NugetUserName: ${{ secrets.COMMON_PACKAGE_NUGET_USERNAME }}
+          NugetToken: ${{ secrets.COMMON_PACKAGE_TOKEN }}
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@v1
+        with:
+          path: ~\sonar\cache
+          key: ${{ github.repository }}-sonar
+          restore-keys: ${{ github.repository }}-sonar
+
+      - name: Cache SonarQube scanner
+        id: cache-sonar-scanner
+        uses: actions/cache@v1        
+        with:
+          path: ./.sonar/scanner
+          key: ${{ github.repository }}-sonar-scanner
+          restore-keys: ${{ github.repository }}-sonar-scanner
+
+      - name: Install SonarQube scanner 
+        if: steps.cache-sonar-scanner.outputs.cache-hit != 'true'            
+        run: |   
+          cd ${{ inputs.workspace }}
+          mkdir .sonar
+          cd .sonar
+          mkdir scanner
+          cd scanner          
+          dotnet tool update dotnet-sonarscanner --tool-path ./       
+
+      - name: Build and analyze        
+        run: |         
+          cd  ${{ inputs.workspace }}
+          pwd
+
+          repo=${{ github.repository }}
+          proj=${repo//polestarchina\//""}
+          # /d:sonar.pullrequest.branch=${{ github.ref_name }} Our license doesn't support it
+          ./.sonar/scanner/dotnet-sonarscanner begin /k:$proj /d:sonar.token=${{ secrets.SONAR_TOKEN }} /d:sonar.host.url="https://dev.china.polestar.cn/sonar/"     
+          dotnet build
+          ./.sonar/scanner/dotnet-sonarscanner end /d:sonar.token=${{ secrets.SONAR_TOKEN }}
+
+      - name: Scan all pakcage
+        if: ${{!inputs.skip_check}}
+        run: |          
+          cd ${{ inputs.github_workspace }}
+          cd ${{ inputs.workspace }}
+          dotnet restore
+          dotnet list package --vulnerable --include-transitive  > build.log          
+
+      # - name: Check package vulnerable invlude transitive
+      #   if: ${{!inputs.skip_check}}
+      #   run: |  
+      #     cd ${{ inputs.github_workspace }}
+      #     cd ${{ inputs.workspace }}        
+      #     cat  build.log
+      #     (grep -i "\ Critical\ " build.log || false) && exit 1          
+          
+          
+
+     

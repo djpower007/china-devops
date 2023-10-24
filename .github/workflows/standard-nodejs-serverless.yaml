@@ -1,0 +1,57 @@
+name: "Nodejs serverless standard pipeline"
+
+on:
+ workflow_call:
+  inputs:
+    repository_ref:
+        required: true
+        type: string
+    build_env:
+        required: true
+        type: string
+    node_version:
+        required: false
+        type: string
+        default: "16"
+    prd_stage_name:
+        required: false
+        type: string
+        default: "prod"
+
+jobs:
+  build:
+    runs-on: [self-hosted, sls, nodejs]
+
+    steps:
+      - name: Show Parameters
+        run: |
+          echo ${{inputs.build_env }}
+          echo ${{inputs.repository_ref }}
+          echo ${{inputs.prd_stage_name }}
+
+      - name: Sets env vars for if selected prod        
+        if: ${{ inputs.build_env  == 'prod'  ||  (!contains(fromJson('["dev", "stg","prod"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/master') }}
+        run: |
+           stgName=prod
+           if test "${{inputs.prd_stage_name}}" = "prd"; then
+              stgName=prd          
+           fi          
+           echo "stage=$stgName" >> $GITHUB_ENV          
+
+      - name: Sets env vars for if selected stg
+        if: ${{ inputs.build_env  == 'stg' || (!contains(fromJson('["dev", "stg","prod"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/stg') }}
+        run: |
+          echo "stage=stg" >> $GITHUB_ENV          
+
+      - name: Sets env vars for dev if selested
+        if: ${{ inputs.build_env  == 'dev' || (!contains(fromJson('["dev", "stg","prod"]'), inputs.build_env) && (inputs.repository_ref == 'refs/heads/dev' || inputs.repository_ref == 'refs/heads/devops') )  }}
+        run: |
+          echo "stage=dev" >> $GITHUB_ENV          
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Deploy to aws serverless
+        run: |
+          npm i
+          npx sls deploy --stage $stage --verbose

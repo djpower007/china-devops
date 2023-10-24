@@ -1,0 +1,57 @@
+name: "Nodejs standard ci pipeline"
+
+on:
+ workflow_call:
+  inputs:
+    repository_ref:
+        required: true
+        type: string    
+    node_version:
+        required: false
+        type: string
+        default: "16"
+
+jobs:
+  nodejs-ci:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ inputs.node_version }}
+      
+      - name: Set npm registry
+        run: |
+            echo -e "\
+            strict-ssl=false    \n\
+            @polestar:registry=https://npm.pkg.github.com \n\
+            @polestarchina:registry=https://npm.pkg.github.com \n\
+            //npm.pkg.github.com/:_authToken=${{ secrets.GTIACTION_NPM_PACAKGE_NODEJS }}" >.npmrc
+
+      - name: Install Dependency
+        run: npm i     
+      
+      - name: Scan package
+        run: |         
+          npm audit --audit-level=critical
+      
+      - name: Setting sonar property
+        run: |
+          repo=${{ github.repository }}
+          proj=${repo//polestarchina\//""}
+          echo -e "\
+            sonar.projectKey=$proj \n\
+            sonar.projectName=$proj \n\
+            sonar.sourceEncoding=UTF-8 " > sonar-project.properties          
+          cat sonar-project.properties
+
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://dev.china.polestar.cn/sonar/

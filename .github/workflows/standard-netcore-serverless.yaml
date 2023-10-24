@@ -1,0 +1,133 @@
+name: "dotnet serverless standard pipeline"
+
+on:
+ workflow_call:
+  inputs:
+    repository_ref:
+        required: true
+        type: string
+    dotnet_version:
+        required: true
+        type: string
+        default: "6.0"
+    workspace:
+        required: true
+        type: string
+    github_workspace:
+        required: true
+        type: string
+        default: "."
+    build_env:
+        required: true
+        type: string    
+    debug_mode:
+        required: false
+        type: boolean    
+
+jobs:
+  build:
+    runs-on: ubuntu-latest    
+    steps:
+      - name: Git pull 
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.repository_ref }}
+      - name: Show all parameters
+        run: |
+          echo ${{ inputs.repository_ref }}
+          echo ${{ inputs.dotnet_version }}
+          echo ${{ inputs.workspace }}
+          echo ${{ inputs.github_workspace }}
+          echo ${{ inputs.build_env }}
+          echo ${{ inputs.debug_mode }}
+          echo ${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_DEV }}
+          echo ${{ secrets.CHINA_AWS_ACCESS_KEY_ID_DEV }}
+          echo ${{ secrets.COMMON_PACKAGE_NUGET_USERNAME }}
+          echo ${{ secrets.COMMON_PACKAGE_TOKEN }}          
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}    
+
+      - name: Sets env vars for if selected prd        
+        if: ${{ inputs.build_env  == 'prd'  ||  (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/master') }}
+        run: |
+          echo "stage=prd" >> $GITHUB_ENV
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_PRD }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_PRD }}" >> $GITHUB_ENV
+
+      - name: Sets env vars for if selected stg
+        if: ${{ inputs.build_env  == 'stg' || (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/stg') }}
+        run: |
+          echo "stage=stg" >> $GITHUB_ENV
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_STG }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_STG }}" >> $GITHUB_ENV
+
+      - name: Sets env vars for dev if selested
+        if: ${{ inputs.build_env  == 'dev' || (!contains(fromJson('["dev", "stg","prd"]'), inputs.build_env) && inputs.repository_ref == 'refs/heads/dev')  }}
+        run: |
+          echo "stage=dev" >> $GITHUB_ENV
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.CHINA_AWS_ACCESS_KEY_ID_DEV }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.CHINA_AWS_SECRET_ACCESS_KEY_DEV }}" >> $GITHUB_ENV      
+
+      - name: setup aws credentials and nuget for $stage        
+        run: |
+          mkdir -p ~/.aws
+          cd ~/.aws
+          touch credentials || exit
+          echo "[polestar-$stage]" >> credentials
+          echo "aws_access_key_id=$AWS_ACCESS_KEY_ID" >> credentials
+          echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" >> credentials
+          echo "region=cn-northwest-1" >> credentials
+
+          touch config || exit 
+          echo "[default]" >> config
+          echo "region=cn-northwest-1"  >> config
+
+          mkdir -p ~/.nuget
+          cd ~/.nuget
+          mkdir -p NuGet
+          cd NuGet
+          touch NuGet.Config || exit
+          echo '<?xml version="1.0" encoding="utf-8"?>
+              <configuration>
+                      <packageSources>
+                              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3"/>
+                              <add key="polestarchina" value="https://nuget.pkg.github.com/polestarchina/index.json" />
+                      </packageSources>
+                      <packageSourceCredentials>
+                      <polestarchina>'  > NuGet.Config
+          echo "<add key=\"Username\" value=\"$NugetUserName\"/>"  >> NuGet.Config
+          echo "              <add key=\"ClearTextPassword\" value=\"$NugetToken\"/>" >> NuGet.Config
+          echo '       </polestarchina> 
+                  </packageSourceCredentials> 
+              </configuration>' >> NuGet.Config
+          cat NuGet.Config
+        env:
+          NugetUserName: ${{ secrets.COMMON_PACKAGE_NUGET_USERNAME }}
+          NugetToken: ${{ secrets.COMMON_PACKAGE_TOKEN }}
+      
+      - name: Npm install modules
+        if: ${{!inputs.debug_mode}}
+        uses: actions/setup-node@v3
+        with:
+          args: install
+
+      - name: Install lambda
+        if: ${{!inputs.debug_mode}}
+        run: dotnet tool install -g Amazon.Lambda.Tools
+
+      - name: Build and Deploy net core app to aws lambda
+        if: ${{!inputs.debug_mode}}
+        run: |
+          cd ${{ inputs.github_workspace }}
+          cd ${{ inputs.workspace }}
+          dotnet restore
+          dotnet lambda package --configuration Release 
+          npm install serverless-domain-manager
+          npm i -g serverless@3.28.0          
+          sls deploy --stage $stage --region cn-northwest-1
+
+      - name: Clean credentials    
+        run: |
+          rm -r ~/.aws
